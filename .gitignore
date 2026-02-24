@@ -1,0 +1,70 @@
+# Environments
+venv/
+env/
+.env
+
+# Data and Models
+data/
+ffhq-dataset/
+fitzpatrick17k/
+faceshape_extra/
+checkpoints/
+mlruns/
+lightning_logs/
+mlflow.db
+*.task
+*.h5
+*.pth
+*.pt
+*.onnx
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Logs and outputs
+*.log
+*.txt
+*.png
+
+# Exclude some specific extra output files you have
+debug_sample_grid.png
+dsmlr_integration_output*.txt
+test_out*.txt
+logs.txt
+lr_output*.txt
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
