@@ -245,7 +245,7 @@ class FaceAnalysisLightningModule(pl.LightningModule):
 
         self.log("val/loss", losses["total"], prog_bar=True,  on_epoch=True, sync_dist=True)
         self.log("val/acc",  self.val_acc,    prog_bar=True,  on_epoch=True)
-        self.log("val_f1",   self.val_f1,     prog_bar=True,  on_epoch=True)
+        self.log("val_f1",   self.val_f1,     prog_bar=True,  on_step=True, on_epoch=True)
 
         return losses["total"]
 

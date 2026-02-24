@@ -255,22 +255,30 @@ def create_dataloaders(config: dict) -> dict:
     with open(annotations_path) as f:
         total = len(json.load(f))
 
+    ORIGINAL_TOTAL = 5755
+    if total < ORIGINAL_TOTAL:
+        ORIGINAL_TOTAL = total
+
     # FIX: train_split is now actually used (was ignored before)
     val_split   = data_cfg["val_split"]
     test_split  = data_cfg["test_split"]
     train_split = data_cfg.get("train_split", 1.0 - val_split - test_split)
 
-    n_val   = int(total * val_split)
-    n_test  = int(total * test_split)
-    n_train = total - n_val - n_test
+    n_val   = int(ORIGINAL_TOTAL * val_split)
+    n_test  = int(ORIGINAL_TOTAL * test_split)
+    n_train_original = ORIGINAL_TOTAL - n_val - n_test
 
-    # Deterministic shuffled indices
+    # Deterministic shuffled indices based ONLY on the original total
     rng     = np.random.default_rng(config["project"]["seed"])
-    indices = rng.permutation(total).tolist()
+    indices = rng.permutation(ORIGINAL_TOTAL).tolist()
 
-    train_idx = indices[:n_train]
-    val_idx   = indices[n_train:n_train + n_val]
-    test_idx  = indices[n_train + n_val:]
+    train_idx = indices[:n_train_original]
+    val_idx   = indices[n_train_original:n_train_original + n_val]
+    test_idx  = indices[n_train_original + n_val:]
+
+    # Append any external data directly to the train split
+    if total > ORIGINAL_TOTAL:
+        train_idx.extend(list(range(ORIGINAL_TOTAL, total)))
 
     logger.info(f"Split sizes → Train: {len(train_idx)} | "
                 f"Val: {len(val_idx)} | Test: {len(test_idx)}")

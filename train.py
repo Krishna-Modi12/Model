@@ -30,6 +30,18 @@ def main(args):
         config["training"]["epochs"] = args.epochs
 
     logger.info("Initializing DataLoaders...")
+    
+    if args.resume:
+        logger.info("Resume flag detected. Adjusting configuration for FINE-TUNING mode.")
+        import os
+        config["paths"]["checkpoints"] = os.path.join(config["paths"]["checkpoints"], "finetuned")
+        os.makedirs(config["paths"]["checkpoints"], exist_ok=True)
+        # Drop learning rate to 1/10th of the original for fine-tuning
+        config["optimizer"]["lr"] = config["optimizer"]["lr"] / 10.0
+        
+        # Extend total maximum epochs slightly (adding 75 epochs to current)
+        config["training"]["epochs"] = 175
+        
     loaders = create_dataloaders(config)
 
     logger.info("Computing balanced class weights from training set...")
