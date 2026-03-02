@@ -1,107 +1,111 @@
 import os
-import json
 import shutil
-from src.config import FACE_SHAPES
+import hashlib
+import csv
+from pathlib import Path
+from tqdm import tqdm
+from PIL import Image
+import imagehash
 
-# 1. Paths
-external_dir = "data/external_faceshape/published_dataset"
-annotations_path = "data/processed/annotations.json"
-output_image_dir = "data/processed/external_images"
+# Config
+ORIGINAL_TEST_MANIFEST = Path('c:/Users/krish/OneDrive/Desktop/Model/original_test_manifest.csv')
+NITEN19_DIR = Path('c:/Users/krish/OneDrive/Desktop/Model/data/raw/niten19/FaceShape Dataset/training_set')
+CURATED_TRAIN_DIR = Path('c:/Users/krish/OneDrive/Desktop/Model/data/curated/face_shape/FaceShape Dataset/training_set')
 
-# Create output dir for copied images
-os.makedirs(output_image_dir, exist_ok=True)
+# The 5 valid classes
+VALID_CLASSES = ['Heart', 'Oblong', 'Oval', 'Round', 'Square']
 
-# 2. Class Mapping
-# External folder names are lowercase versions of FACE_SHAPES
-label_map = {shape.lower(): i for i, shape in enumerate(FACE_SHAPES)}
-print("Label Map:", label_map)
+def get_image_hashes(img_path: Path):
+    try:
+        md5 = hashlib.md5(img_path.read_bytes()).hexdigest()
+        with Image.open(img_path) as img:
+            phash = str(imagehash.phash(img))
+        return md5, phash
+    except Exception:
+        return None, None
 
-# 3. Load existing annotations
-with open(annotations_path, "r") as f:
-    annotations = json.load(f)
+def load_test_manifest():
+    test_md5s = set()
+    with open(ORIGINAL_TEST_MANIFEST, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            test_md5s.add(row['md5'])
+    return test_md5s
 
-print(f"Original annotations count: {len(annotations)}")
-original_count = len(annotations)
-
-# Keep track of existing filenames to prevent exact name duplicates
-# (Though external images will be in a different folder, it's good practice)
-existing_paths = set(ann["image_path"] for ann in annotations)
-
-# 4. Integrate external images
-new_annotations = []
-for folder_name in os.listdir(external_dir):
-    folder_path = os.path.join(external_dir, folder_name)
-    if not os.path.isdir(folder_path):
-        continue
-        
-    class_name = folder_name.lower()
-    if class_name not in label_map:
-        print(f"Skipping unknown class folder: {folder_name}")
-        continue
-        
-    class_id = label_map[class_name]
+def main():
+    print("Loading test set manifest...")
+    test_md5s = load_test_manifest()
+    print(f"Loaded {len(test_md5s)} test set MD5 hashes.")
     
-    for filename in os.listdir(folder_path):
-        if not filename.endswith(('.jpg', '.jpeg', '.png')):
+    # We will also compute pHashes for curated training set to avoid duplicates within train set
+    print("Hashing existing curated training images...")
+    existing_train_md5s = set()
+    existing_train_phashes = set()
+    
+    for cls in VALID_CLASSES:
+        cls_dir = CURATED_TRAIN_DIR / cls
+        if not cls_dir.exists(): continue
+        for img_name in tqdm(os.listdir(cls_dir), desc=f"Hashing curated {cls}"):
+            img_path = cls_dir / img_name
+            md5, phash = get_image_hashes(img_path)
+            if md5:
+                existing_train_md5s.add(md5)
+                # Store phash to avoid near-duplicates
+                existing_train_phashes.add(phash)
+                
+    print(f"Loaded {len(existing_train_md5s)} existing train MD5 hashes.")
+    
+    # Process Niten19
+    added_count = 0
+    duplicate_test_count = 0
+    duplicate_train_count = 0
+    error_count = 0
+    
+    for cls in VALID_CLASSES:
+        src_dir = NITEN19_DIR / cls
+        dst_dir = CURATED_TRAIN_DIR / cls
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not src_dir.exists():
+            print(f"Warning: {src_dir} (Niten19) does not exist.")
             continue
             
-        src_path = os.path.join(folder_path, filename)
-        
-        # We prefix external images to avoid naming collisions
-        dest_filename = f"ext_{folder_name}_{filename}"
-        dest_path = os.path.join(output_image_dir, dest_filename).replace("\\", "/") # standardize slashes
-        
-        # Copy file
-        shutil.copy2(src_path, dest_path)
-        
-        # Create annotation entry
-        ann = {
-            "image_path": dest_path,
-            "shape_label": class_id
-        }
-        
-        # Ensure we don't add duplicates (based on the new path)
-        if dest_path not in existing_paths:
-            new_annotations.append(ann)
-            existing_paths.add(dest_path)
+        img_files = os.listdir(src_dir)
+        for img_name in tqdm(img_files, desc=f"Merging Niten19 {cls}"):
+            img_path = src_dir / img_name
+            # Skip non-images
+            if not img_path.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']: continue
+            
+            md5, phash = get_image_hashes(img_path)
+            if not md5:
+                error_count += 1
+                continue
+                
+            # Check collisions
+            if md5 in test_md5s:
+                duplicate_test_count += 1
+                continue
+                
+            # pHash gives us protection against slightly modified duplicates
+            if md5 in existing_train_md5s or phash in existing_train_phashes:
+                duplicate_train_count += 1
+                continue
+                
+            # Safely copy to target with a deterministic new name
+            new_name = f"niten19_{md5[:8]}{img_path.suffix.lower()}"
+            shutil.copy2(img_path, dst_dir / new_name)
+            
+            # Register to prevent intra-niten19 duplicates
+            existing_train_md5s.add(md5)
+            existing_train_phashes.add(phash)
+            added_count += 1
+            
+    print("\n--- Merge Summary ---")
+    print(f"Successfully added images: {added_count}")
+    print(f"Skipped (Test Set Collision): {duplicate_test_count}")
+    print(f"Skipped (Already in Train Set): {duplicate_train_count}")
+    print(f"Errors (Corrupt image): {error_count}")
+    print("---------------------")
 
-print(f"Added {len(new_annotations)} new external images.")
-
-# Append to annotations
-annotations.extend(new_annotations)
-
-# 5. Save back
-print("Saving merged annotations.json...")
-with open(annotations_path, "w") as f:
-    json.dump(annotations, f, indent=2)
-
-print(f"New total annotations count: {len(annotations)}")
-
-# 6. Calculate new training distribution
-# We need to simulate the train split from dataset.py to know the new distribution
-# dataset.py uses seed=42, original_count=5755 (or whatever it actually was)
-val_split = 0.15
-test_split = 0.1
-n_val = int(original_count * val_split)
-n_test = int(original_count * test_split)
-n_train_original = original_count - n_val - n_test
-
-# The new images are purely appended to train_idx
-new_train_count = n_train_original + len(new_annotations)
-
-train_shape_counts = {shape: 0 for shape in FACE_SHAPES}
-
-import numpy as np
-rng = np.random.default_rng(42)
-indices = rng.permutation(original_count).tolist()
-train_idx = indices[:n_train_original]
-# Append the new indices
-train_idx.extend(list(range(original_count, len(annotations))))
-
-for idx in train_idx:
-    shape_id = annotations[idx]["shape_label"]
-    train_shape_counts[FACE_SHAPES[shape_id]] += 1
-
-print("\n--- NEW TRAINING SET CLASS DISTRIBUTION ---")
-for shape, count in train_shape_counts.items():
-    print(f"{shape}: {count}")
+if __name__ == "__main__":
+    main()

@@ -152,8 +152,11 @@ class FaceAnalysisLightningModule(pl.LightningModule):
         n_features = 0
         for label_key, logits in feature_tasks.items():
             if label_key in batch:
-                feature_loss_sum += self.feature_loss(logits, batch[label_key])
-                n_features += 1
+                target = batch[label_key]
+                mask = target >= 0
+                if mask.any():
+                    feature_loss_sum += self.feature_loss(logits[mask], target[mask])
+                    n_features += 1
         if n_features > 0:
             losses["features"] = feature_loss_sum / n_features
 
@@ -183,8 +186,16 @@ class FaceAnalysisLightningModule(pl.LightningModule):
 
         # ── Symmetry regression ──
         if "symmetry_scores" in batch:
-            losses["symmetry"] = self.symmetry_loss(
-                output.symmetry_score.squeeze(), batch["symmetry_scores"])
+            # Filter for samples with valid labels (dataset.py sends -1.0 for missing)
+            sym_labels = batch["symmetry_scores"]
+            sym_mask = sym_labels >= 0
+            if sym_mask.any():
+                losses["symmetry"] = self.symmetry_loss(
+                    output.symmetry_score.squeeze()[sym_mask], 
+                    sym_labels[sym_mask]
+                )
+            else:
+                losses["symmetry"] = torch.tensor(0.0, device=self.device, requires_grad=False)
 
         # ── Weighted total ──
         total = self.w_shape * losses["shape"]
@@ -235,6 +246,11 @@ class FaceAnalysisLightningModule(pl.LightningModule):
 
         return losses["total"]
 
+    def on_validation_epoch_end(self):
+        val_f1 = self.val_f1.compute()
+        print(f"\nEPOCH {self.current_epoch} VALIDATION F1: {val_f1:.4f}")
+        self.val_f1.reset()
+        
     def validation_step(self, batch, batch_idx):
         output = self(batch["images"], batch["geometric_ratios"])
         losses = self._compute_loss(output, batch)

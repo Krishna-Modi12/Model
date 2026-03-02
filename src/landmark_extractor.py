@@ -11,38 +11,60 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 
 class FaceLandmarkProcessor:
     def __init__(self, max_num_faces=1, min_detection_confidence=0.5):
-        # We need the local model asset for the tasks API
-        model_path = os.path.join(os.path.dirname(__file__), "..", "face_landmarker.task")
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found at {model_path}. Please download it.")
+        self._use_legacy_api = True
+        try:
+            # Try legacy API
+            self.mp_face_mesh = mp.solutions.face_mesh
+            self.face_mesh = self.mp_face_mesh.FaceMesh(
+                static_image_mode=True,
+                max_num_faces=max_num_faces,
+                refine_landmarks=True,
+                min_detection_confidence=min_detection_confidence,
+            )
+            print("FaceLandmarkProcessor initialized (legacy API)")
+        except AttributeError:
+            # Fallback to Tasks API
+            self._use_legacy_api = False
+            # We need the local model asset for the tasks API
+            model_path = os.path.join(os.path.dirname(__file__), "..", "face_landmarker.task")
+            if not os.path.exists(model_path):
+                # Search common locations
+                alt_paths = ["face_landmarker.task", os.path.join(os.getcwd(), "face_landmarker.task")]
+                for p in alt_paths:
+                    if os.path.exists(p):
+                        model_path = p
+                        break
+            
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model file not found at {model_path}. Please download it.")
 
-        options = FaceLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=model_path),
-            running_mode=VisionRunningMode.IMAGE,
-            num_faces=max_num_faces,
-            min_face_detection_confidence=min_detection_confidence,
-            min_face_presence_confidence=min_detection_confidence,
-        )
-        self.landmarker = FaceLandmarker.create_from_options(options)
+            from mediapipe.tasks import python as mp_python
+            from mediapipe.tasks.python import vision
+            
+            options = vision.FaceLandmarkerOptions(
+                base_options=mp_python.BaseOptions(model_asset_path=model_path),
+                running_mode=vision.RunningMode.IMAGE,
+                num_faces=max_num_faces,
+                min_face_detection_confidence=min_detection_confidence,
+                min_face_presence_confidence=min_detection_confidence,
+            )
+            self.landmarker = vision.FaceLandmarker.create_from_options(options)
+            print("FaceLandmarkProcessor initialized (Tasks API)")
         
     def get_landmarks(self, image_rgb):
-        # Convert numpy array to MediaPipe Image
+        if self._use_legacy_api:
+            results = self.face_mesh.process(image_rgb)
+            if not results.multi_face_landmarks:
+                return None
+            return np.array([[lm.x, lm.y, lm.z] for lm in results.multi_face_landmarks[0].landmark])
+        
+        # Tasks API path
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
-        
-        # Process the image
         detection_result = self.landmarker.detect(mp_image)
-        
         if not detection_result.face_landmarks:
             return None
-            
-        # Get the first face detected
-        face_landmarks = detection_result.face_landmarks[0]
-        
-        # Convert NormalizedLandmark objects to numpy array
-        landmarks = np.array([
-            [lm.x, lm.y, lm.z] for lm in face_landmarks
-        ])
-        return landmarks
+        return np.array([[lm.x, lm.y, lm.z] for lm in detection_result.face_landmarks[0]])
+
 
     @staticmethod
     def get_eye_centers(landmarks, img_w, img_h):

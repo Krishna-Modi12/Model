@@ -1,5 +1,6 @@
 # Environments
 venv/
+venv_colab_match/
 env/
 .env
 
@@ -46,6 +47,9 @@ MANIFEST
 *.log
 *.txt
 *.png
+logs/
+pseudo_labels/
+pseudo_label_samples/
 
 # Exclude some specific extra output files you have
 debug_sample_grid.png

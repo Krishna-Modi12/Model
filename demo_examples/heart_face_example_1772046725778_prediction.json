@@ -1,0 +1,19 @@
+{
+  "image": "C:\\Users\\krish\\OneDrive\\Desktop\\Model\\demo_examples\\heart_face_example_1772046725778.png",
+  "face_index": 0,
+  "predicted_class": "Oval",
+  "confidence": 0.3443,
+  "all_scores": {
+    "Heart": 0.3151,
+    "Oblong": 0.1793,
+    "Oval": 0.3443,
+    "Round": 0.0849,
+    "Square": 0.0764
+  },
+  "bbox": [
+    121,
+    92,
+    395,
+    471
+  ]
+}
