@@ -34,8 +34,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 APP_TITLE       = "Face Shape AI"
 APP_SUBTITLE    = "Upload a photo · Get your face shape instantly"
-MODEL_ACCURACY  = "79.21%"
-MODEL_NAME      = "celeba_v5_epoch=14_val_f1=0.7654"
+MODEL_ACCURACY  = "92.45% (Face Shape)"
+MODEL_NAME      = "model_v6_multitask_skin"
 DEMO_DIR        = PROJECT_ROOT / "demo_examples"
 
 FACE_SHAPE_INFO = {
@@ -252,10 +252,11 @@ def init_model():
 def run_inference(pil_image: Image.Image):
     """
     Accepts PIL Image from Gradio → temp file → predict_single() →
-    returns (annotated_image, shape_label_html, confidence_scores, json_result).
+    returns (annotated_image, shape_label_html, confidence_scores, 
+             eye, brow, lip, skin, age, gender, json_result).
     """
     if pil_image is None:
-        return (None, "", {}, {"status": "awaiting_upload"})
+        return (None, "", {}, "", "", "", "", "", "", {"status": "awaiting_upload"})
 
     tmp_path = None
     try:
@@ -270,6 +271,7 @@ def run_inference(pil_image: Image.Image):
             pil_image,
             _error_html("Something went wrong", str(e)),
             {},
+            "", "", "", "", "", "",
             {"error": str(e)},
         )
     finally:
@@ -284,6 +286,7 @@ def run_inference(pil_image: Image.Image):
             pil_image,
             _error_html("No Face Detected", error_msg),
             {},
+            "", "", "", "", "", "",
             {"error": error_msg},
         )
 
@@ -297,7 +300,18 @@ def run_inference(pil_image: Image.Image):
     if "bbox" in json_out:
         json_out["bbox"] = list(json_out["bbox"])
 
-    return (annotated, label_html, scores, json_out)
+    return (
+        annotated,
+        label_html,
+        scores,
+        r.get("eye_shape", "N/A"),
+        r.get("brow_type", "N/A"),
+        r.get("lip_shape", "N/A"),
+        r.get("skin_tone", "N/A"),
+        r.get("age_group", "N/A"),
+        r.get("gender", "N/A"),
+        json_out
+    )
 
 
 def _prediction_html(shape: str, conf: float) -> str:
@@ -400,12 +414,25 @@ def build_results_panel():
         label="Prediction",
     )
     confidence = gr.Label(
-        label="Confidence Scores",
+        label="Face Shape Confidences",
         num_top_classes=5,
         elem_classes=["glass-card"],
     )
-    json_out = gr.JSON(label="Full Result (JSON)", visible=True)
-    return annotated_img, shape_label, confidence, json_out
+
+    with gr.Accordion("📋 Extended Facial Attributes (Multi-task)", open=True, elem_classes=["glass-card"]):
+        with gr.Row():
+            attr_eye = gr.Textbox(label="Eye Shape")
+            attr_brow = gr.Textbox(label="Brow Type")
+        with gr.Row():
+            attr_lip = gr.Textbox(label="Lip Shape")
+            attr_skin = gr.Textbox(label="Skin Tone (Monk)")
+        with gr.Row():
+            attr_age = gr.Textbox(label="Age Group")
+            attr_gender = gr.Textbox(label="Gender")
+
+    json_out = gr.JSON(label="Full Result (JSON)", visible=False)
+    
+    return annotated_img, shape_label, confidence, attr_eye, attr_brow, attr_lip, attr_skin, attr_age, attr_gender, json_out
 
 def build_shape_info_cards():
     cards_html = '<div class="shape-cards">'

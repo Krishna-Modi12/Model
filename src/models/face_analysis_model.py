@@ -1,11 +1,17 @@
 """
-face_analysis_model.py  (FIXED)
-─────────────────────────────────────────────────────────────
-Fixes applied:
-  1. Duplicate lip_conf calculation removed from predict().
-     Previously lip_probs[i].max(0) was called twice; lip_conf2
-     was computed and silently discarded.
-─────────────────────────────────────────────────────────────
+face_analysis_model.py  (MULTI-TASK EXTENDED)
+────────────────────────────────────────────────────────────────────────────
+Changes for multi-task learning:
+  1. Added 6 new prediction heads branching from fused features:
+     - eye_head (multi-label binary with BCEWithLogitsLoss)
+     - brow_head (2-class)
+     - lip_head (2-class)
+     - age_head (2-class)
+     - gender_head (2-class)
+     - landmark_head (15 regression outputs)
+  2. FaceAnalysisOutput dataclass updated with new fields
+  3. Backward compatible: existing forward signature preserved
+────────────────────────────────────────────────────────────────────────────
 """
 
 import torch
@@ -30,13 +36,20 @@ JAW_CLASSES        = ["pointed", "square", "rounded"]
 
 @dataclass
 class ModelOutput:
-    face_shape_logits: torch.Tensor   # (B, 7)
-    eye_logits:        torch.Tensor   # (B, 6)
-    nose_logits:       torch.Tensor   # (B, 5)
-    lip_logits:        torch.Tensor   # (B, 4)
-    brow_logits:       torch.Tensor   # (B, 3)
-    jaw_logits:        torch.Tensor   # (B, 3)
-    symmetry_score:    torch.Tensor   # (B, 1)
+    face_shape_logits: torch.Tensor   # (B, 5) - PRIMARY TASK (unchanged)
+    eye_logits:        torch.Tensor   # (B, 6) - legacy (unchanged)
+    nose_logits:       torch.Tensor   # (B, 5) - legacy (unchanged)
+    lip_logits:        torch.Tensor   # (B, 4) - legacy (unchanged)
+    brow_logits:       torch.Tensor   # (B, 3) - legacy (unchanged)
+    jaw_logits:        torch.Tensor   # (B, 3) - legacy (unchanged)
+    symmetry_score:    torch.Tensor   # (B, 1) - legacy (unchanged)
+    eye_narrow_logits: torch.Tensor  # (B, 2) - multi-label binary
+    brow_type_logits:  torch.Tensor  # (B, 2)
+    lip_shape_logits:  torch.Tensor  # (B, 2)
+    age_logits:        torch.Tensor  # (B, 2)
+    gender_logits:     torch.Tensor  # (B, 2)
+    landmark_pred:    torch.Tensor  # (B, 15)
+    skin_tone_logits:  torch.Tensor  # (B, 10) - Monk Scale
 
 
 class ClassificationHead(nn.Module):
@@ -114,8 +127,14 @@ class FaceAnalysisModel(nn.Module):
         if freeze_backbone:
             self.freeze_backbone()
 
+        # Face shape head with fused features
         self.face_shape_head = FaceShapeHead(
             backbone_features, geometric_features, num_classes=num_classes, dropout=dropout)
+        
+        # Fused feature dimension: 512 (visual) + 64 (geo) = 576
+        fused_dim = 512 + 64
+
+        # Legacy heads (unchanged)
         self.eye_head    = ClassificationHead(backbone_features, 256, 6,  dropout)
         self.nose_head   = ClassificationHead(backbone_features, 256, 5,  dropout)
         self.lip_head    = ClassificationHead(backbone_features, 256, 4,  dropout)
@@ -128,11 +147,62 @@ class FaceAnalysisModel(nn.Module):
             nn.Sigmoid(),
         )
 
+        # NEW: Multi-task heads branching from fused features (576 dims)
+        # Eye - multi-label binary (BCEWithLogitsLoss, NOT CrossEntropy)
+        self.eye_narrow_head = nn.Sequential(
+            nn.Linear(fused_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 2)  # outputs: [narrow_logit, big_logit]
+        )  # apply sigmoid, NOT softmax
+
+        # Brow - medium complexity 2-layer MLP
+        self.brow_type_head = nn.Sequential(
+            nn.Linear(fused_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2)
+        )
+
+        # Lip - medium complexity 2-layer MLP
+        self.lip_shape_head = nn.Sequential(
+            nn.Linear(fused_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2)
+        )
+
+        # Age - easy task, single linear layer
+        self.age_head = nn.Linear(fused_dim, 2)
+
+        # Gender - easy task, single linear layer
+        self.gender_head = nn.Linear(fused_dim, 2)
+
+        self.landmark_head = nn.Sequential(
+            nn.Linear(fused_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 15)  # predicts 15 geometric ratios
+        )
+
+        # Skin tone - classification, 10 Monk Scale classes
+        self.skin_tone_head = nn.Linear(fused_dim, 10)
+
         logger.info("FaceAnalysisModel built successfully")
+
+    def _get_fused_features(self, features: torch.Tensor, geometric_ratios: torch.Tensor) -> torch.Tensor:
+        """Extract fused visual + geometric features."""
+        visual = self.face_shape_head.visual_proj(features)
+        geo = self.face_shape_head.geo_proj(geometric_ratios)
+        return torch.cat([visual, geo], dim=1)
 
     def forward(self, images: torch.Tensor,
                 geometric_ratios: torch.Tensor) -> ModelOutput:
         features = self.backbone(images)
+        
+        # Get fused features for new multi-task heads
+        fused = self._get_fused_features(features, geometric_ratios)
+        
         return ModelOutput(
             face_shape_logits = self.face_shape_head(features, geometric_ratios),
             eye_logits        = self.eye_head(features),
@@ -141,25 +211,35 @@ class FaceAnalysisModel(nn.Module):
             brow_logits       = self.brow_head(features),
             jaw_logits        = self.jaw_head(features),
             symmetry_score    = self.symmetry_head(features),
+            # NEW: Multi-task outputs
+            eye_narrow_logits = self.eye_narrow_head(fused),
+            brow_type_logits  = self.brow_type_head(fused),
+            lip_shape_logits  = self.lip_shape_head(fused),
+            age_logits        = self.age_head(fused),
+            gender_logits     = self.gender_head(fused),
+            landmark_pred     = self.landmark_head(fused),
+            skin_tone_logits  = self.skin_tone_head(fused),
         )
 
     def freeze_backbone(self):
         for param in self.backbone.parameters():
             param.requires_grad = False
+        self.backbone.eval()  # CRITICAL: Freeze BatchNorm running stats!
         logger.info("Backbone FROZEN")
 
     def unfreeze_backbone(self, num_blocks: Optional[int] = None):
         if num_blocks is None:
             for param in self.backbone.parameters():
                 param.requires_grad = True
+            self.backbone.train() # CRITICAL: resume batchnorm
             logger.info("Backbone fully UNFROZEN")
         else:
             blocks = list(self.backbone.children())
             for block in blocks[-num_blocks:]:
                 for param in block.parameters():
                     param.requires_grad = True
+            self.backbone.train()
             logger.info(f"Backbone last {num_blocks} blocks UNFROZEN")
-
     def get_optimizer_param_groups(self, lr: float,
                                     backbone_lr_multiplier: float = 0.1):
         backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
@@ -170,7 +250,14 @@ class FaceAnalysisModel(nn.Module):
             list(self.lip_head.parameters()) +
             list(self.brow_head.parameters()) +
             list(self.jaw_head.parameters()) +
-            list(self.symmetry_head.parameters())
+            list(self.symmetry_head.parameters()) +
+            # NEW: Multi-task heads
+            list(self.eye_narrow_head.parameters()) +
+            list(self.brow_type_head.parameters()) +
+            list(self.lip_shape_head.parameters()) +
+            list(self.age_head.parameters()) +
+            list(self.gender_head.parameters()) +
+            list(self.landmark_head.parameters())
         )
         return [
             {"params": backbone_params, "lr": lr * backbone_lr_multiplier,

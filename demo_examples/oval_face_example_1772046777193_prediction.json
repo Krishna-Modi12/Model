@@ -1,0 +1,41 @@
+{
+  "image": "C:\\Users\\krish\\OneDrive\\Desktop\\Model\\demo_examples\\oval_face_example_1772046777193.png",
+  "face_index": 0,
+  "predicted_class": "Oval",
+  "confidence": 0.5003,
+  "all_scores": {
+    "Heart": 0.0398,
+    "Oblong": 0.0865,
+    "Oval": 0.5003,
+    "Round": 0.3211,
+    "Square": 0.0523
+  },
+  "eye_shape": "Big/Round",
+  "brow_type": "Normal/Flat",
+  "lip_shape": "Thin/Normal",
+  "age_group": "Young",
+  "gender": "Male",
+  "landmarks": [
+    0.9916025996208191,
+    0.4512293040752411,
+    0.6574504375457764,
+    0.8289985060691833,
+    0.5258461833000183,
+    0.736299455165863,
+    1.0653765201568604,
+    0.5867711901664734,
+    0.09067625552415848,
+    0.2835223078727722,
+    0.15704485774040222,
+    0.2875085175037384,
+    -0.014101812615990639,
+    -0.41095390915870667,
+    0.12133079022169113
+  ],
+  "bbox": [
+    90,
+    87,
+    456,
+    522
+  ]
+}

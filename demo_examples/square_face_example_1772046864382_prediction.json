@@ -1,0 +1,41 @@
+{
+  "image": "C:\\Users\\krish\\OneDrive\\Desktop\\Model\\demo_examples\\square_face_example_1772046864382.png",
+  "face_index": 0,
+  "predicted_class": "Square",
+  "confidence": 0.6397,
+  "all_scores": {
+    "Heart": 0.1706,
+    "Oblong": 0.0311,
+    "Oval": 0.1433,
+    "Round": 0.0153,
+    "Square": 0.6397
+  },
+  "eye_shape": "Big/Round",
+  "brow_type": "Normal/Flat",
+  "lip_shape": "Thin/Normal",
+  "age_group": "Young",
+  "gender": "Male",
+  "landmarks": [
+    1.1894973516464233,
+    0.5137861371040344,
+    0.8443062901496887,
+    0.9636821150779724,
+    0.4960775375366211,
+    0.8132052421569824,
+    1.2333855628967285,
+    0.5946354866027832,
+    0.09520652890205383,
+    0.2881743907928467,
+    0.06678163260221481,
+    0.32416412234306335,
+    0.01094034407287836,
+    -0.38064074516296387,
+    -0.013083765283226967
+  ],
+  "bbox": [
+    120,
+    86,
+    401,
+    491
+  ]
+}

@@ -31,8 +31,8 @@ from src.utils.landmark_extractor import LandmarkExtractor
 # ── Constants ───────────────────────────────────────────────
 SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".webp"}
 DEFAULT_CHECKPOINT = str(
-    PROJECT_ROOT / "checkpoints" / "celeba_v5"
-    / "celeba_v5_epoch=14_val_f1=0.7654.ckpt"
+    PROJECT_ROOT / "checkpoints" / "final"
+    / "model_v6_multitask_skin.ckpt"
 )
 IMAGE_SIZE = 224
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -119,11 +119,44 @@ def load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
     """
     Load the trained model from a Lightning checkpoint.
     Returns the inner FaceAnalysisModel in eval mode.
+    Handles both MultiTask and legacy single-task checkpoints.
     """
     print(f"Loading checkpoint: {checkpoint_path}")
-    lightning_module = FaceAnalysisLightningModule.load_from_checkpoint(
-        checkpoint_path, map_location=device
-    )
+    
+    # Try MultitaskAttributesFinetuner first (from latest attribute-only training)
+    try:
+        from train_attributes_only import MultitaskAttributesFinetuner
+        # We need to provide the base checkpoint it expects. It doesn't actually matter for inference 
+        # because the weights of the loaded checkpoint will overwrite it immediately, but we must pass a valid path to instantiate it.
+        base_ckpt = "checkpoints/multitask/multitask_epoch=epoch=4_val_f1=val_f1=0.9245.ckpt"
+        lightning_module = MultitaskAttributesFinetuner.load_from_checkpoint(
+            checkpoint_path, map_location=device, strict=False, model_checkpoint=base_ckpt
+        )
+        print("  Loaded as MultitaskAttributesFinetuner checkpoint")
+    except Exception as e1:
+        # Try MultiTaskLightningModule next (for multi-task checkpoints)
+        try:
+            from train_multitask import MultiTaskLightningModule
+            lightning_module = MultiTaskLightningModule.load_from_checkpoint(
+                checkpoint_path, map_location=device, strict=False
+            )
+            print("  Loaded as MultiTask checkpoint")
+        except Exception as e2:
+            # Fall back to legacy FaceAnalysisLightningModule
+            try:
+                from src.training.trainer import FaceAnalysisLightningModule
+                lightning_module = FaceAnalysisLightningModule.load_from_checkpoint(
+                    checkpoint_path, map_location=device, strict=False
+                )
+                print("  Loaded as legacy checkpoint")
+            except RuntimeError as e:
+                print(f"Warning: Could not load with strict=False: {e}")
+                from src.config import get_config_dict
+                from src.training.trainer import FaceAnalysisLightningModule
+                lightning_module = FaceAnalysisLightningModule.load_from_checkpoint(
+                    checkpoint_path, map_location=device, config=get_config_dict()
+                )
+    
     model = lightning_module.model
     model.to(device)
     model.eval()
@@ -174,11 +207,34 @@ def predict_single(
         geo_ratios = torch.from_numpy(face_data["geometric_ratios"]).float().unsqueeze(0).to(device)
 
         logits_list = []
+        out_eye = []
+        out_brow = []
+        out_lip = []
+        out_age = []
+        out_gender = []
+        out_landmark = []
+        out_skin_tone = []
+        is_multitask = False
+
         with torch.no_grad():
             for tta_kwargs in tta_transforms:
                 image_tensor = preprocess_image(face_data["face_crop"], **tta_kwargs).unsqueeze(0).to(device)
                 output = model(image_tensor, geo_ratios)
-                logits_list.append(output.face_shape_logits)
+                
+                if isinstance(output, torch.Tensor):
+                    logits_list.append(output)
+                else:
+                    logits_list.append(output.face_shape_logits)
+                    if hasattr(output, 'eye_narrow_logits') and output.eye_narrow_logits is not None:
+                        is_multitask = True
+                        out_eye.append(output.eye_narrow_logits)
+                        out_brow.append(output.brow_type_logits)
+                        out_lip.append(output.lip_shape_logits)
+                        out_age.append(output.age_logits)
+                        out_gender.append(output.gender_logits)
+                        out_landmark.append(output.landmark_pred)
+                        if hasattr(output, 'skin_tone_logits') and output.skin_tone_logits is not None:
+                            out_skin_tone.append(output.skin_tone_logits)
             
             # Simple average of logits from all robust passes
             avg_logits = torch.stack(logits_list).mean(dim=0)
@@ -193,12 +249,61 @@ def predict_single(
             for i in range(len(FACE_SHAPES))
         }
 
+        if is_multitask:
+            avg_eye = torch.stack(out_eye).mean(dim=0)
+            avg_brow = torch.stack(out_brow).mean(dim=0)
+            avg_lip = torch.stack(out_lip).mean(dim=0)
+            avg_age = torch.stack(out_age).mean(dim=0)
+            avg_gender = torch.stack(out_gender).mean(dim=0)
+            pred_landmarks = torch.stack(out_landmark).mean(dim=0).squeeze(0).cpu().numpy().tolist()
+
+            eye_probs = torch.sigmoid(avg_eye).squeeze(0).cpu().numpy()
+            if eye_probs[0] > 0.5:
+                eye_shape = "Narrow"
+            elif eye_probs[1] > 0.5:
+                eye_shape = "Big/Round"
+            else:
+                eye_shape = "Almond"
+
+            brow_idx = int(avg_brow.argmax(dim=1))
+            brow_type = "Thick/Arched" if brow_idx == 1 else "Normal/Flat"
+
+            lip_idx = int(avg_lip.argmax(dim=1))
+            lip_shape = "Full" if lip_idx == 1 else "Thin/Normal"
+
+            age_idx = int(avg_age.argmax(dim=1))
+            age_group = "Older" if age_idx == 1 else "Young"
+
+            gender_idx = int(avg_gender.argmax(dim=1))
+            gender_type = "Male" if gender_idx == 1 else "Female"
+            
+            skin_tone = "N/A"
+            if out_skin_tone:
+                avg_skin = torch.stack(out_skin_tone).mean(dim=0)
+                skin_idx = int(avg_skin.argmax(dim=1))
+                skin_tone = f"Monk {skin_idx + 1}"
+        else:
+            eye_shape = "N/A"
+            brow_type = "N/A"
+            lip_shape = "N/A"
+            age_group = "N/A"
+            gender_type = "N/A"
+            skin_tone = "N/A"
+            pred_landmarks = face_data["geometric_ratios"].tolist()
+
         result = {
             "image": image_path,
             "face_index": face_idx,
             "predicted_class": predicted_class,
             "confidence": round(confidence, 4),
             "all_scores": all_scores,
+            "eye_shape": eye_shape,
+            "brow_type": brow_type,
+            "lip_shape": lip_shape,
+            "age_group": age_group,
+            "gender": gender_type,
+            "skin_tone": skin_tone,
+            "landmarks": pred_landmarks,
             "bbox": face_data["bbox"],
         }
         results.append(result)
@@ -223,6 +328,12 @@ def print_result(result: Dict) -> None:
     print("=" * 48)
     print(f"  Predicted Face Shape : {result['predicted_class']}")
     print(f"  Confidence           : {result['confidence'] * 100:.2f}%")
+    print(f"  Eye Shape            : {result.get('eye_shape', 'N/A')}")
+    print(f"  Brow Type            : {result.get('brow_type', 'N/A')}")
+    print(f"  Lip Shape            : {result.get('lip_shape', 'N/A')}")
+    print(f"  Age Group            : {result.get('age_group', 'N/A')}")
+    print(f"  Gender               : {result.get('gender', 'N/A')}")
+    print(f"  Skin Tone            : {result.get('skin_tone', 'N/A')}")
     print()
     print("  All Class Scores:")
     for cls_name, score in result["all_scores"].items():
