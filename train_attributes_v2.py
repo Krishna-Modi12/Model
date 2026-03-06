@@ -16,6 +16,22 @@ import torchmetrics
 from src.models.face_analysis_model import FaceAnalysisModel
 from src.data.dataset import FaceAnalysisDataset, get_train_transforms, get_val_transforms
 
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, weight=None):
+        super().__init__()
+        self.gamma = gamma
+        self.register_buffer("weight", weight)
+
+    def forward(self, logits, targets):
+        ce_loss = F.cross_entropy(
+            logits, targets,
+            weight=self.weight,
+            reduction="none"
+        )
+        pt = torch.exp(-ce_loss)
+        focal = (1 - pt) ** self.gamma * ce_loss
+        return focal.mean()
+
 def compute_class_weights(annotations, key, num_classes):
     counts = [0] * num_classes
     for ann in annotations:
@@ -70,10 +86,11 @@ class AttributeOnlyLightningModule(L.LightningModule):
         # Apply permanent freeze
         self.model.freeze_for_attribute_training()
         
-        # Weights
         self.register_buffer("age_class_weights", age_weights)
         self.register_buffer("gender_class_weights", gender_weights)
         self.register_buffer("skin_class_weights", skin_weights)
+        # Using balanced weights since data will be oversampled, but still focus on hard samples
+        self.skin_focal_loss = FocalLoss(gamma=3.0) 
 
     def on_train_epoch_start(self):
         self.model.backbone.eval()
@@ -86,7 +103,7 @@ class AttributeOnlyLightningModule(L.LightningModule):
         print(f"[Epoch {self.current_epoch}] Backbone: FROZEN ✅ | Face shape head: FROZEN ✅")
 
     def training_step(self, batch, batch_idx):
-        output = self.model(batch["images"], batch["geometric_ratios"])
+        output = self.model(batch["images"], batch["geometric_ratios"], batch["hsv_histogram"])
         
         attr_mask = batch["has_attributes"]
         skin_mask = batch["monk_labels"] != -100
@@ -123,15 +140,20 @@ class AttributeOnlyLightningModule(L.LightningModule):
             total_loss += 0.20 * loss_landmark
                            
         if skin_mask.any():
-            loss_skin = F.cross_entropy(output.skin_tone_logits[skin_mask], batch["monk_labels"][skin_mask], weight=self.skin_class_weights)
-            self.log("train/loss_skin", loss_skin)
-            total_loss += 0.25 * loss_skin
+            loss_skin = self.skin_focal_loss(output.skin_tone_logits[skin_mask], batch["monk_labels"][skin_mask])
+            self.log("train/loss_skin", loss_skin, prog_bar=True)
+            
+            skin_preds = output.skin_tone_logits[skin_mask].argmax(dim=1)
+            skin_correct = (skin_preds == batch["monk_labels"][skin_mask]).float().mean()
+            self.log("train/skin_acc", skin_correct, prog_bar=True)
+            
+            total_loss += 1.0 * loss_skin
             
         self.log("train/loss_total", total_loss, prog_bar=True)
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        output = self.model(batch["images"], batch["geometric_ratios"])
+        output = self.model(batch["images"], batch["geometric_ratios"], batch["hsv_histogram"])
         
         valid_shape_mask = batch["shape_labels"] != -100
         if valid_shape_mask.any():
@@ -161,18 +183,33 @@ class AttributeOnlyLightningModule(L.LightningModule):
             val_loss_total += 0.20 * loss_landmark
                                
         if skin_mask.any():
-            loss_skin = F.cross_entropy(output.skin_tone_logits[skin_mask], batch["monk_labels"][skin_mask], weight=self.skin_class_weights)
-            val_loss_total += 0.25 * loss_skin
+            loss_skin = self.skin_focal_loss(output.skin_tone_logits[skin_mask], batch["monk_labels"][skin_mask])
+            val_loss_total += 1.0 * loss_skin
+            
+            skin_preds = output.skin_tone_logits[skin_mask].argmax(dim=1)
+            skin_correct = (skin_preds == batch["monk_labels"][skin_mask]).float().mean()
+            self.log("val/skin_acc", skin_correct, prog_bar=True)
+            self.log("val/loss_skin", loss_skin)
             
         if val_loss_total > 0:
             self.log("val/loss_total", val_loss_total, sync_dist=True, prog_bar=True)
+            self.log("val_loss_total", val_loss_total, sync_dist=True, prog_bar=False)
 
     def configure_optimizers(self):
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        print(f"Optimizer covers: {len(trainable_params)} parameter tensors (attribute heads only)")
+        # Discriminative learning rate: Higher for the newly initialized skin tone head
+        skin_params = list(self.model.skin_tone_head.parameters())
+        other_trainable_params = [
+            p for n, p in self.model.named_parameters() 
+            if p.requires_grad and "skin_tone_head" not in n
+        ]
         
-        optimizer = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=1e-3)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
+        param_groups = [
+            {"params": other_trainable_params, "lr": 1e-4},
+            {"params": skin_params, "lr": 1e-3} # 10x higher LR for the randomly initialized tower
+        ]
+        
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=1e-3)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=150, eta_min=1e-6)
         return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 
 class FaceShapeGuardCallback(L.Callback):
@@ -226,25 +263,28 @@ def verify_face_shape_baseline(model, test_loader, device):
 
 def main():
     print("================================================")
-    print("ATTRIBUTE-ONLY TRAINING — CONFIG")
+    print("ATTRIBUTE V2 TRAINING — HSV + FOCAL LOSS")
     print("================================================")
     print("Seed                  : 42")
-    print("Checkpoint From       : V5 (checkpoints/celeba_v5/celeba_v5_epoch=14_val_f1=0.7654.ckpt)")
+    print("Checkpoint From       : attributes_only best ckpt")
     print("Optimizer             : AdamW lr=1e-4 wd=1e-3")
-    print("Scheduler             : CosineAnnealingLR T_max=50")
-    print("Max Epochs            : 80")
-    print("Early Stop            : patience=15 on val/loss_total")
+    print("Scheduler             : CosineAnnealingLR T_max=150")
+    print("Max Epochs            : 150")
+    print("Early Stop            : patience=25 on val/loss_total")
     print("Face shape guard      : stop if val/face_acc < 0.740")
     print("Batch Size            : 16")
     print("Mixed Precision       : 16-mixed ✅")
     print("replace_sampler_ddp   : False ✅")
     print("Loss weights          : eye(0.20) brow(0.20) lip(0.20) age(0.15) gender(0.15) skin(0.25) landmark(0.20)")
     print("num_workers           : 0 ✅")
-    print("Saving To             : checkpoints/attributes_only/")
+    print("Saving To             : checkpoints/attributes_v2/")
     print("================================================\n")
 
-    with open("data/processed/annotations_multitask_balanced.json", "r") as f:
+    # Load final rebalanced dataset
+    ann_path = "data/processed/annotations_multitask_final.json"
+    with open(ann_path, "r") as f:
         data = json.load(f)
+    print(f"Loaded {len(data)} samples from {ann_path}")
 
     # Calculate class weights
     age_weights = compute_class_weights(data, "age", 2)
@@ -264,7 +304,7 @@ def main():
     train_set = all_data[:split_idx]
 
     train_dataset = FaceAnalysisDataset(
-        annotations_path="data/processed/annotations_multitask_balanced.json",
+        annotations_path=ann_path,
         image_size=224,
         transforms=get_train_transforms(224, {"training": {}}),
         landmarks_cache_dir="data/landmarks_cache",
@@ -272,7 +312,7 @@ def main():
     )
     
     val_dataset = FaceAnalysisDataset(
-        annotations_path="data/processed/annotations_multitask_balanced.json",
+        annotations_path=ann_path,
         image_size=224,
         transforms=get_val_transforms(224),
         landmarks_cache_dir="data/landmarks_cache",
@@ -289,7 +329,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
 
     # Initialize Model with V5 checkpoint
-    ckpt_path = "checkpoints/celeba_v5/celeba_v5_epoch=14_val_f1=0.7654.ckpt"
+    ckpt_path = r"checkpoints\attributes_only\attrs_only_epoch=15_val\loss_total=0.4621.ckpt"
     
     model = AttributeOnlyLightningModule(
         model_checkpoint=ckpt_path,
@@ -305,8 +345,8 @@ def main():
 
     callbacks = [
         ModelCheckpoint(
-            dirpath="checkpoints/attributes_only",
-            filename="attrs_only_{epoch:02d}_{val/loss_total:.4f}",
+            dirpath="checkpoints/attributes_v2",
+            filename="attrs_v2_{epoch:02d}_{val_loss_total:.4f}",
             monitor="val/loss_total",
             mode="min",
             save_top_k=3,
@@ -314,14 +354,14 @@ def main():
         ),
         EarlyStopping(
             monitor="val/loss_total",
-            patience=15,
+            patience=25,
             mode="min"
         ),
         FaceShapeGuardCallback()
     ]
     
     trainer = L.Trainer(
-        max_epochs=80,
+        max_epochs=150,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         precision="16-mixed" if torch.cuda.is_available() else 32,

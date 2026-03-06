@@ -25,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import FACE_SHAPES
+from src.data.dataset import extract_hsv_histogram_np
 from src.training.trainer import FaceAnalysisLightningModule
 from src.utils.landmark_extractor import LandmarkExtractor
 
@@ -123,22 +124,23 @@ def load_model(checkpoint_path: str, device: torch.device) -> torch.nn.Module:
     """
     print(f"Loading checkpoint: {checkpoint_path}")
     
-    # Try MultitaskAttributesFinetuner first (from latest attribute-only training)
+    from eval_multitask_proper import get_config_dict
+
     try:
-        from train_attributes_only import MultitaskAttributesFinetuner
-        # We need to provide the base checkpoint it expects. It doesn't actually matter for inference 
-        # because the weights of the loaded checkpoint will overwrite it immediately, but we must pass a valid path to instantiate it.
-        base_ckpt = "checkpoints/multitask/multitask_epoch=epoch=4_val_f1=val_f1=0.9245.ckpt"
-        lightning_module = MultitaskAttributesFinetuner.load_from_checkpoint(
-            checkpoint_path, map_location=device, strict=False, model_checkpoint=base_ckpt
+        from train_attributes_v2 import AttributeOnlyLightningModule
+        lightning_module = AttributeOnlyLightningModule.load_from_checkpoint(
+            checkpoint_path, map_location=device, config=get_config_dict(), strict=False
         )
-        print("  Loaded as MultitaskAttributesFinetuner checkpoint")
-    except Exception as e1:
-        # Try MultiTaskLightningModule next (for multi-task checkpoints)
+        print("  Loaded as AttributeOnlyLightningModule checkpoint")
+    except Exception as e0:
+        # Try MultitaskAttributesFinetuner first (from latest attribute-only training)
         try:
-            from train_multitask import MultiTaskLightningModule
-            lightning_module = MultiTaskLightningModule.load_from_checkpoint(
-                checkpoint_path, map_location=device, strict=False
+            from train_attributes_only import MultitaskAttributesFinetuner
+            # We need to provide the base checkpoint it expects. It doesn't actually matter for inference 
+            # because the weights of the loaded checkpoint will overwrite it immediately, but we must pass a valid path to instantiate it.
+            base_ckpt = "checkpoints/multitask/multitask_epoch=epoch=4_val_f1=val_f1=0.9245.ckpt"
+            lightning_module = MultitaskAttributesFinetuner.load_from_checkpoint(
+                checkpoint_path, map_location=device, strict=False, model_checkpoint=base_ckpt
             )
             print("  Loaded as MultiTask checkpoint")
         except Exception as e2:
@@ -190,8 +192,13 @@ def predict_single(
     # Detect faces
     faces = detect_and_crop_faces(image_bgr, extractor)
     if not faces:
-        print(f"  [WARNING] No face detected in: {os.path.basename(image_path)}")
-        return [{"image": image_path, "error": "No face detected — try a front-facing photo with good lighting and no obstructions. Slight tilts are OK."}]
+        # Fallback for skin tone only (if no face detected)
+        faces = [{
+            "face_crop": image_bgr,
+            "geometric_ratios": np.zeros(15),
+            "bbox": (0, 0, image_bgr.shape[1], image_bgr.shape[0]),
+            "is_skin_patch": True
+        }]
 
     results = []
     for face_idx, face_data in enumerate(faces):
@@ -219,7 +226,13 @@ def predict_single(
         with torch.no_grad():
             for tta_kwargs in tta_transforms:
                 image_tensor = preprocess_image(face_data["face_crop"], **tta_kwargs).unsqueeze(0).to(device)
-                output = model(image_tensor, geo_ratios)
+                
+                # Extract HSV histogram (numpy based on base face crop for efficiency as it is mostly flip/rotation invariant)
+                # But since preprocess_image can rotate/scale, let's just use the crop
+                image_rgb = cv2.cvtColor(face_data["face_crop"], cv2.COLOR_BGR2RGB)
+                hsv_hist = torch.from_numpy(extract_hsv_histogram_np(image_rgb)).unsqueeze(0).to(device)
+                
+                output = model(image_tensor, geo_ratios, hsv_hist)
                 
                 if isinstance(output, torch.Tensor):
                     logits_list.append(output)
@@ -280,8 +293,9 @@ def predict_single(
             skin_tone = "N/A"
             if out_skin_tone:
                 avg_skin = torch.stack(out_skin_tone).mean(dim=0)
+                skin_names = {0: "Light", 1: "Medium", 2: "Dark"}
                 skin_idx = int(avg_skin.argmax(dim=1))
-                skin_tone = f"Monk {skin_idx + 1}"
+                skin_tone = skin_names.get(skin_idx, f"Unknown ({skin_idx})")
         else:
             eye_shape = "N/A"
             brow_type = "N/A"
@@ -294,17 +308,18 @@ def predict_single(
         result = {
             "image": image_path,
             "face_index": face_idx,
-            "predicted_class": predicted_class,
-            "confidence": round(confidence, 4),
-            "all_scores": all_scores,
-            "eye_shape": eye_shape,
-            "brow_type": brow_type,
-            "lip_shape": lip_shape,
-            "age_group": age_group,
-            "gender": gender_type,
+            "predicted_class": predicted_class if not face_data.get("is_skin_patch") else "N/A (Skin Only)",
+            "confidence": round(confidence, 4) if not face_data.get("is_skin_patch") else 0.0,
+            "all_scores": all_scores if not face_data.get("is_skin_patch") else {},
+            "eye_shape": eye_shape if not face_data.get("is_skin_patch") else "N/A",
+            "brow_type": brow_type if not face_data.get("is_skin_patch") else "N/A",
+            "lip_shape": lip_shape if not face_data.get("is_skin_patch") else "N/A",
+            "age_group": age_group if not face_data.get("is_skin_patch") else "N/A",
+            "gender": gender_type if not face_data.get("is_skin_patch") else "N/A",
             "skin_tone": skin_tone,
             "landmarks": pred_landmarks,
             "bbox": face_data["bbox"],
+            "is_skin_patch": face_data.get("is_skin_patch", False)
         }
         results.append(result)
 

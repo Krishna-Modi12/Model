@@ -49,7 +49,7 @@ class ModelOutput:
     age_logits:        torch.Tensor  # (B, 2)
     gender_logits:     torch.Tensor  # (B, 2)
     landmark_pred:    torch.Tensor  # (B, 15)
-    skin_tone_logits:  torch.Tensor  # (B, 10) - Monk Scale
+    skin_tone_logits:  torch.Tensor  # (B, 3) - Monk Scale (Light/Medium/Dark)
 
 
 class ClassificationHead(nn.Module):
@@ -103,6 +103,34 @@ class FaceShapeHead(nn.Module):
         )
 
 
+class SkinTower(nn.Module):
+    def __init__(self, bb_dim: int, hsv_dim: int, dropout: float = 0.2):
+        super().__init__()
+        self.bb_proj = nn.Sequential(
+            nn.Linear(bb_dim, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(dropout)
+        )
+        self.hsv_proj = nn.Sequential(
+            nn.Linear(hsv_dim, 128),
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.Dropout(dropout)
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(256 + 128, 128),
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.Linear(128, 3)
+        )
+
+    def forward(self, bb_features: torch.Tensor, hsv_histogram: torch.Tensor) -> torch.Tensor:
+        bb_feat = self.bb_proj(bb_features)
+        hsv_feat = self.hsv_proj(hsv_histogram)
+        combined = torch.cat([bb_feat, hsv_feat], dim=1)
+        return self.classifier(combined)
+
 class FaceAnalysisModel(nn.Module):
     """Multi-task face analysis model on EfficientNet-B4 backbone."""
 
@@ -147,46 +175,53 @@ class FaceAnalysisModel(nn.Module):
             nn.Sigmoid(),
         )
 
-        # NEW: Multi-task heads branching from fused features (576 dims)
-        # Eye - multi-label binary (BCEWithLogitsLoss, NOT CrossEntropy)
+        # NEW: Multi-task heads branching from FULL visual features (1792 dims)
+        # Using backbone_features directly to avoid bottlenecking through Face Shape's visual_proj
         self.eye_narrow_head = nn.Sequential(
-            nn.Linear(fused_dim, 256),
+            nn.Dropout(dropout),
+            nn.Linear(backbone_features, 256),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 2)  # outputs: [narrow_logit, big_logit]
-        )  # apply sigmoid, NOT softmax
+            nn.Linear(256, 2)
+        )
 
-        # Brow - medium complexity 2-layer MLP
         self.brow_type_head = nn.Sequential(
-            nn.Linear(fused_dim, 128),
+            nn.Dropout(dropout),
+            nn.Linear(backbone_features, 256),
             nn.ReLU(),
-            nn.Linear(128, 2)
+            nn.Linear(256, 4)
         )
-
-        # Lip - medium complexity 2-layer MLP
         self.lip_shape_head = nn.Sequential(
-            nn.Linear(fused_dim, 128),
+            nn.Dropout(dropout),
+            nn.Linear(backbone_features, 256),
             nn.ReLU(),
-            nn.Linear(128, 2)
+            nn.Linear(256, 2)
+        )
+        
+        # Age (Binary) and Gender (Binary)
+        self.age_head = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(backbone_features, 256),
+            nn.ReLU(),
+            nn.Linear(256, 2)
+        )
+        self.gender_head = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(backbone_features, 256),
+            nn.ReLU(),
+            nn.Linear(256, 2)
         )
 
-        # Age - easy task, single linear layer
-        self.age_head = nn.Linear(fused_dim, 2)
-
-        # Gender - easy task, single linear layer
-        self.gender_head = nn.Linear(fused_dim, 2)
-
+        # Landmarks - 15 points * 2 (x,y) = 30
         self.landmark_head = nn.Sequential(
-            nn.Linear(fused_dim, 512),
-            nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(512, 256),
+            nn.Linear(backbone_features, 256),
             nn.ReLU(),
             nn.Linear(256, 15)  # predicts 15 geometric ratios
         )
 
-        # Skin tone - classification, 10 Monk Scale classes
-        self.skin_tone_head = nn.Linear(fused_dim, 10)
+        # Skin tone - classification, 3 Monk Scale classes (Light/Medium/Dark)
+        # Using TWO-TOWER FUSION: 1792 (backbone) and 48 (HSV color features)
+        self.skin_tone_head = SkinTower(backbone_features, 48, dropout=dropout)
 
         logger.info("FaceAnalysisModel built successfully")
 
@@ -197,10 +232,11 @@ class FaceAnalysisModel(nn.Module):
         return torch.cat([visual, geo], dim=1)
 
     def forward(self, images: torch.Tensor,
-                geometric_ratios: torch.Tensor) -> ModelOutput:
+                geometric_ratios: torch.Tensor,
+                hsv_histogram: Optional[torch.Tensor] = None) -> ModelOutput:
         features = self.backbone(images)
         
-        # Get fused features for new multi-task heads
+        # Get fused features for Face Shape ONLY (it requires geometry)
         fused = self._get_fused_features(features, geometric_ratios)
         
         return ModelOutput(
@@ -211,15 +247,37 @@ class FaceAnalysisModel(nn.Module):
             brow_logits       = self.brow_head(features),
             jaw_logits        = self.jaw_head(features),
             symmetry_score    = self.symmetry_head(features),
-            # NEW: Multi-task outputs
-            eye_narrow_logits = self.eye_narrow_head(fused),
-            brow_type_logits  = self.brow_type_head(fused),
-            lip_shape_logits  = self.lip_shape_head(fused),
-            age_logits        = self.age_head(fused),
-            gender_logits     = self.gender_head(fused),
-            landmark_pred     = self.landmark_head(fused),
-            skin_tone_logits  = self.skin_tone_head(fused),
+            # NEW: Multi-task outputs wired DIRECTLY to backbone features
+            eye_narrow_logits = self.eye_narrow_head(features),
+            brow_type_logits  = self.brow_type_head(features),
+            lip_shape_logits  = self.lip_shape_head(features),
+            age_logits        = self.age_head(features),
+            gender_logits     = self.gender_head(features),
+            landmark_pred     = self.landmark_head(features),
+            skin_tone_logits  = self.skin_tone_head(features, hsv_histogram if hsv_histogram is not None else torch.zeros(features.shape[0], 48).to(features.device)),
         )
+    def get_parameter_groups(self):
+        """Returns separate param groups for dual optimizer setup"""
+        backbone_params = list(self.backbone.parameters())
+        
+        # All head parameters - everything except backbone
+        head_params = (
+            list(self.face_shape_head.parameters()) +
+            list(self.eye_head.parameters()) +
+            list(self.nose_head.parameters()) +
+            list(self.lip_head.parameters()) +
+            list(self.brow_head.parameters()) +
+            list(self.jaw_head.parameters()) +
+            list(self.symmetry_head.parameters()) +
+            list(self.eye_narrow_head.parameters()) +
+            list(self.brow_type_head.parameters()) +
+            list(self.lip_shape_head.parameters()) +
+            list(self.age_head.parameters()) +
+            list(self.gender_head.parameters()) +
+            list(self.landmark_head.parameters()) +
+            list(self.skin_tone_head.parameters())
+        )
+        return backbone_params, head_params
 
     def freeze_backbone(self):
         for param in self.backbone.parameters():
@@ -240,6 +298,67 @@ class FaceAnalysisModel(nn.Module):
                     param.requires_grad = True
             self.backbone.train()
             logger.info(f"Backbone last {num_blocks} blocks UNFROZEN")
+
+    def freeze_for_attribute_training(self):
+        """
+        Mathematically paralyzes backbone and face shape head.
+        requires_grad=False means:
+          - No gradient computed for these parameters
+          - No weight updates regardless of optimizer LR
+          - Feature space locked permanently
+          - Face shape accuracy preserved exactly
+        """
+        # Freeze backbone
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+            
+        # Freeze face shape head (fusion layers are inside)
+        for param in self.face_shape_head.parameters():
+            param.requires_grad = False
+            
+        # Freeze legacy single-task heads from V5
+        for head in [self.eye_head, self.nose_head, self.lip_head, self.brow_head, self.jaw_head, self.symmetry_head]:
+            for param in head.parameters():
+                param.requires_grad = False
+
+        # Force eval() mode on ALL frozen modules
+        # This locks BatchNorm running statistics permanently
+        self.backbone.eval()
+        self.face_shape_head.eval()
+        for head in [self.eye_head, self.nose_head, self.lip_head, self.brow_head, self.jaw_head, self.symmetry_head]:
+            head.eval()
+
+        # Verify freeze was applied correctly
+        backbone_frozen = all(
+            not p.requires_grad for p in self.backbone.parameters()
+        )
+        head_frozen = all(
+            not p.requires_grad for p in self.face_shape_head.parameters()
+        )
+
+        assert backbone_frozen, "[CRITICAL] Backbone freeze FAILED - abort training"
+        assert head_frozen, "[CRITICAL] Face shape head freeze FAILED - abort training"
+
+        # Count frozen vs trainable parameters
+        total_params = sum(p.numel() for p in self.parameters())
+        frozen_params = sum(p.numel() for p in self.parameters() if not p.requires_grad)
+        trainable_params = total_params - frozen_params
+
+        print("================================================")
+        print("FREEZE VERIFICATION")
+        print("================================================")
+        print(f"Total parameters    : {total_params:,}")
+        print(f"Frozen parameters   : {frozen_params:,} ✅")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Trainable %         : {100*trainable_params/total_params:.1f}%")
+        print(f"Backbone frozen     : {backbone_frozen} ✅")
+        print(f"Face shape frozen   : {head_frozen} ✅")
+        print("================================================")
+
+        trainable_pct = trainable_params / total_params
+        if trainable_pct > 0.10:
+            print(f"[WARNING] {trainable_pct:.1%} trainable — more than expected 1-5%")
+            print("  Verify fusion layer freeze decision is correct")
     def get_optimizer_param_groups(self, lr: float,
                                     backbone_lr_multiplier: float = 0.1):
         backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
@@ -268,11 +387,12 @@ class FaceAnalysisModel(nn.Module):
 
     def predict(self, images: torch.Tensor,
                 geometric_ratios: torch.Tensor,
+                hsv_histogram: Optional[torch.Tensor] = None,
                 confidence_threshold: float = 0.60) -> list:
         """Returns human-readable predictions for a batch."""
         self.eval()
         with torch.no_grad():
-            output = self.forward(images, geometric_ratios)
+            output = self.forward(images, geometric_ratios, hsv_histogram)
 
         shape_probs = F.softmax(output.face_shape_logits, dim=1)
         eye_probs   = F.softmax(output.eye_logits,        dim=1)

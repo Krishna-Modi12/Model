@@ -33,10 +33,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 APP_TITLE       = "Face Shape AI"
-APP_SUBTITLE    = "Upload a photo · Get your face shape instantly"
-MODEL_ACCURACY  = "92.45% (Face Shape)"
-MODEL_NAME      = "model_v6_multitask_skin"
+APP_SUBTITLE    = "Upload a photo · Get your complete facial analysis"
+MODEL_ACCURACY  = "79.21% face shape · 82.29% skin tone"
+MODEL_NAME      = "V6 Multi-task · EfficientNet-B4 · 8 prediction heads"
 DEMO_DIR        = PROJECT_ROOT / "demo_examples"
+CHECKPOINT_PATH = PROJECT_ROOT / "checkpoints" / "attributes_v2" / "last-v5.ckpt"
 
 FACE_SHAPE_INFO = {
     "Heart":  {"icon": "💜", "color": "#E879F9", "desc": "Wider forehead, narrow pointed chin"},
@@ -229,7 +230,7 @@ CUSTOM_CSS = """
 # MODEL — Load model and extractor once at startup
 # ═══════════════════════════════════════════════════════════════
 
-from predict import load_model, predict_single, DEFAULT_CHECKPOINT
+from predict import load_model, predict_single
 from src.utils.landmark_extractor import LandmarkExtractor
 
 DEVICE    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -240,7 +241,7 @@ def init_model():
     """Load model and extractor once at startup."""
     global MODEL, EXTRACTOR
     print(f"  ✦ Loading model on: {DEVICE}")
-    MODEL = load_model(DEFAULT_CHECKPOINT, DEVICE)
+    MODEL = load_model(CHECKPOINT_PATH, DEVICE)
     EXTRACTOR = LandmarkExtractor(static_image_mode=True)
     print(f"  ✦ Model ready: {MODEL_NAME}")
 
@@ -314,7 +315,16 @@ def run_inference(pil_image: Image.Image):
     )
 
 
-def _prediction_html(shape: str, conf: float) -> str:
+    if shape == "N/A (Skin Only)":
+        return f"""
+        <div class="prediction-badge">
+            <div style="font-size: 2.5rem; margin-bottom: 0.2rem;">🧴</div>
+            <div class="shape-name" style="background: linear-gradient(135deg, #2BCDEE, #10B981);">Skin Patch</div>
+            <div class="confidence">Clinical Analysis Mode</div>
+            <div style="color: #94A3B8; font-size: 0.85rem; margin-top: 0.4rem;">Analyzing skin tone ignoring face geometry</div>
+        </div>
+        """
+
     info = FACE_SHAPE_INFO.get(shape, {})
     icon = info.get("icon", "✨")
     desc = info.get("desc", "")
@@ -358,23 +368,33 @@ def draw_bounding_box(pil_image: Image.Image, result: dict) -> Image.Image:
     x, y, w, h = bbox
     x1, y1, x2, y2 = x, y, x + w, y + h
 
-    # Accent green box with 3px width
-    box_color = "#10B981"
-    draw.rectangle([x1, y1, x2, y2], outline=box_color, width=3)
+    is_patch = result.get("is_skin_patch", False)
+    
+    if is_patch:
+        # Subtle border for full image analysis
+        box_color = "#2BCDEE" # Cyan for skin patches
+        draw.rectangle([0, 0, img.width-1, img.height-1], outline=box_color, width=5)
+        label = "PURE SKIN ANALYSIS"
+    else:
+        # Accent green box with 3px width
+        box_color = "#10B981" # Green for faces
+        draw.rectangle([x1, y1, x2, y2], outline=box_color, width=3)
+        label = f"{result['predicted_class']} ({result['confidence'] * 100:.1f}%)"
 
-    # Label
-    label = f"{result['predicted_class']} ({result['confidence'] * 100:.1f}%)"
     try:
         font = ImageFont.truetype("arial.ttf", 18)
     except (OSError, IOError):
         font = ImageFont.load_default()
 
-    text_bb = draw.textbbox((x1, y1 - 22), label, font=font)
+    label_y = y1 - 22 if not is_patch else 10
+    label_x = x1 if not is_patch else 10
+
+    text_bb = draw.textbbox((label_x, label_y), label, font=font)
     draw.rectangle(
         [text_bb[0] - 3, text_bb[1] - 2, text_bb[2] + 5, text_bb[3] + 2],
         fill=box_color,
     )
-    draw.text((x1, y1 - 22), label, fill="black", font=font)
+    draw.text((label_x, label_y), label, fill="black" if not is_patch else "white", font=font)
 
     return img
 
@@ -500,21 +520,29 @@ def build_demo() -> gr.Blocks:
                 build_examples(image_input)
 
             with gr.Column(scale=1):
-                annotated_output, shape_label, confidence_bars, json_out = build_results_panel()
+                annotated_output, shape_label, confidence_bars, \
+                attr_eye, attr_brow, attr_lip, attr_skin, attr_age, attr_gender, \
+                json_out = build_results_panel()
 
         build_shape_info_cards()
         build_footer()
 
         # ── Wire inference ──
+        outputs = [
+            annotated_output, shape_label, confidence_bars,
+            attr_eye, attr_brow, attr_lip, attr_skin, attr_age, attr_gender,
+            json_out
+        ]
+        
         classify_btn.click(
             fn=run_inference,
             inputs=[image_input],
-            outputs=[annotated_output, shape_label, confidence_bars, json_out],
+            outputs=outputs,
         )
         image_input.change(
             fn=run_inference,
             inputs=[image_input],
-            outputs=[annotated_output, shape_label, confidence_bars, json_out],
+            outputs=outputs,
         )
 
     return demo

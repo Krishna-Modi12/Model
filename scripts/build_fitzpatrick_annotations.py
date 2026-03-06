@@ -32,18 +32,17 @@ OUTPUT_JSON = PROJECT_ROOT / "data" / "processed" / "annotations_multitask_balan
 
 def map_fitz_to_monk(fitz_val: int) -> int:
     """
-    Clinically maps Fitzpatrick I-VI to approximate Monk 1-10.
-    1-2 (Light) -> Monk 2
-    3-4 (Medium) -> Monk 5
-    5-6 (Dark) -> Monk 8
-    (0-indexed for CrossEntropyLoss)
+    Clinically maps Fitzpatrick I-VI to Light/Medium/Dark (0, 1, 2).
+    1-2 (Light) -> 0
+    3-4 (Medium) -> 1
+    5-6 (Dark) -> 2
     """
     if fitz_val in [1, 2]:
-        return 1  # Monk 2 (index 1)
+        return 0  # Light
     elif fitz_val in [3, 4]:
-        return 4  # Monk 5 (index 4)
+        return 1  # Medium
     elif fitz_val in [5, 6]:
-        return 7  # Monk 8 (index 7)
+        return 2  # Dark
     return -100
 
 def download_image(url: str, save_path: Path) -> bool:
@@ -92,9 +91,13 @@ def run():
     added_count = 0
     download_tasks = []
     
-    # Phase 1: Dispatch downloads in parallel (limit to a subset to avoid excessive time/bandwidth for now)
-    SUBSET_LIMIT = 1000  # We grab 1000 clinical images to integrate effectively without hanging forever
-    rows_to_process = [r for r in rows_to_process if r.get('fitzpatrick_scale', '').isdigit()][:SUBSET_LIMIT]
+    # Phase 1: Dispatch downloads in parallel
+    SUBSET_LIMIT = 12000  # Increased for better generalization
+    import random
+    random.seed(42)
+    valid_rows = [r for r in rows_to_process if r.get('fitzpatrick_scale', '').isdigit()]
+    random.shuffle(valid_rows)
+    rows_to_process = valid_rows[:SUBSET_LIMIT]
     
     logger.info(f"Attempting batch download/verification of {len(rows_to_process)} images...")
     
