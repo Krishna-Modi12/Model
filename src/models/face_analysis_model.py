@@ -348,11 +348,11 @@ class FaceAnalysisModel(nn.Module):
         print("FREEZE VERIFICATION")
         print("================================================")
         print(f"Total parameters    : {total_params:,}")
-        print(f"Frozen parameters   : {frozen_params:,} ✅")
+        print(f"Frozen parameters   : {frozen_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
         print(f"Trainable %         : {100*trainable_params/total_params:.1f}%")
-        print(f"Backbone frozen     : {backbone_frozen} ✅")
-        print(f"Face shape frozen   : {head_frozen} ✅")
+        print(f"Backbone frozen     : {backbone_frozen} ")
+        print(f"Face shape frozen   : {head_frozen} ")
         print("================================================")
 
         trainable_pct = trainable_params / total_params
