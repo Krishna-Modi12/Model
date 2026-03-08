@@ -6,6 +6,7 @@ env/
 
 # Data and Models
 data/
+!src/data/
 ffhq-dataset/
 fitzpatrick17k/
 faceshape_extra/

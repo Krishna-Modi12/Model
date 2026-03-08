@@ -99,7 +99,8 @@ class DualOptimizerLightningModule(L.LightningModule):
         age_logits        = self.model.age_head(detached_features)
         gender_logits     = self.model.gender_head(detached_features)
         landmark_pred     = self.model.landmark_head(detached_features)
-        skin_tone_logits  = self.model.skin_tone_head(detached_features)
+        hsv_placeholder = torch.zeros(detached_features.shape[0], 48, device=detached_features.device)
+        skin_tone_logits  = self.model.skin_tone_head(detached_features, hsv_placeholder)
 
         # 2. Compute Diagnostics (Batch 0 only)
         attr_mask = batch.get("has_attributes", torch.zeros_like(batch["shape_labels"], dtype=torch.bool))

@@ -235,10 +235,7 @@ class FaceAnalysisModel(nn.Module):
                 geometric_ratios: torch.Tensor,
                 hsv_histogram: Optional[torch.Tensor] = None) -> ModelOutput:
         features = self.backbone(images)
-        
-        # Get fused features for Face Shape ONLY (it requires geometry)
-        fused = self._get_fused_features(features, geometric_ratios)
-        
+
         return ModelOutput(
             face_shape_logits = self.face_shape_head(features, geometric_ratios),
             eye_logits        = self.eye_head(features),
@@ -376,7 +373,8 @@ class FaceAnalysisModel(nn.Module):
             list(self.lip_shape_head.parameters()) +
             list(self.age_head.parameters()) +
             list(self.gender_head.parameters()) +
-            list(self.landmark_head.parameters())
+            list(self.landmark_head.parameters()) +
+            list(self.skin_tone_head.parameters())
         )
         return [
             {"params": backbone_params, "lr": lr * backbone_lr_multiplier,
