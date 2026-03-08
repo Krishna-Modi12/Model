@@ -50,9 +50,9 @@ class MultiTaskLoss(nn.Module):
         # We skip landmark loss (0.30) for now and re-distribute or keep it for future heatmaps
         # redistributed_weights = shape: 0.50, features: 0.20, skin: 0.30
         
-        total_loss = (self.weights['shape'] * l_shape) + \
-                     (self.weights['features'] * l_features) + \
-                     (self.weights['skin'] * l_skin)
+        total_loss = (self.weights['face_shape_weight'] * l_shape) + \
+                     (self.weights['features_weight'] * l_features) + \
+                     (self.weights['skin_tone_weight'] * l_skin)
         
         return {
             "total": total_loss,
